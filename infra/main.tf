@@ -7,7 +7,7 @@
 # No servers, no Lambda, no IAM roles.
 
 locals {
-  name        = "${var.resource_prefix}-${var.project}-${var.environment}"
+  name        = coalesce(var.resource_name, "${var.resource_prefix}-${var.project}-${var.environment}")
   bucket_name = coalesce(var.bucket_name, "${local.name}-${var.aws_account_id}")
   origin_id   = "s3-site"
 
@@ -27,6 +27,7 @@ locals {
 
 resource "aws_s3_bucket" "site" {
   bucket = local.bucket_name
+  tags   = { Name = local.bucket_name }
 
   lifecycle {
     # Holds the live site. Removing it from code must never delete it.
@@ -114,6 +115,7 @@ resource "aws_cloudfront_distribution" "site" {
   enabled             = true
   comment             = local.name
   aliases             = var.domain_names
+  tags                = { Name = local.name }
   default_root_object = "index.html"
   http_version        = "http2and3"
   is_ipv6_enabled     = true
@@ -170,6 +172,12 @@ resource "aws_cloudfront_distribution" "site" {
 
   lifecycle {
     prevent_destroy = true
+
+    # A CloudFront pricing plan (e.g. the flat-rate Free plan, chosen in the
+    # console) attaches its own web ACL and sets the price class, and AWS
+    # refuses to remove that web ACL. These two are therefore applied when
+    # the distribution is created and left alone afterwards.
+    ignore_changes = [web_acl_id, price_class]
 
     precondition {
       condition     = length(var.domain_names) == 0 || local.certificate_arn != null

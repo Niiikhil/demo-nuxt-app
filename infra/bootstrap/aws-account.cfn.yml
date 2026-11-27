@@ -9,6 +9,10 @@ Parameters:
     Type: String
     Description: GitHub organization or user whose repositories may deploy.
     AllowedPattern: "^[A-Za-z0-9-]+$"
+  GitHubOwnerId:
+    Type: String
+    AllowedPattern: "^[0-9]+$"
+    Description: Numeric ID of the GitHub owner (bootstrap.sh looks it up). Pins the newer immutable token format to this exact account.
   RepositoryPattern:
     Type: String
     Default: "*"
@@ -17,7 +21,15 @@ Parameters:
     Type: String
     Default: nuxt
     AllowedPattern: "^[a-z][a-z0-9-]{1,10}$"
-    Description: Every site resource is named <prefix>-...; the deploy role can only manage those.
+    Description: Prefix for the stack's own names (state bucket, role) and the default site names.
+  ManagedNamePattern:
+    Type: String
+    Default: "*"
+    AllowedPattern: "^[a-z0-9*.-]+$"
+    Description: >-
+      Which S3 bucket and CloudFront function names the deploy role may manage.
+      "*" = any name (sites choose names freely via S3_BUCKET_NAME / RESOURCE_NAME).
+      "mysite-*" = only names starting with mysite-. Deleting buckets stays denied either way.
   CreateOIDCProvider:
     Type: String
     AllowedValues: ["true", "false"]
@@ -112,14 +124,26 @@ Resources:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               # Only jobs that run in a GitHub *environment* (the deploy job
               # does). Pull requests and other workflows can't get in.
+              # GitHub issues two subject formats; repositories using the
+              # newer one include immutable owner/repo IDs:
+              #   repo:owner/repo:environment:dev
+              #   repo:owner@<owner id>/repo@<repo id>:environment:dev
               StringLike:
-                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOwner}/${RepositoryPattern}:environment:*"
+                token.actions.githubusercontent.com:sub:
+                  - !Sub "repo:${GitHubOwner}/${RepositoryPattern}:environment:*"
+                  - !Sub "repo:${GitHubOwner}@${GitHubOwnerId}/${RepositoryPattern}@*:environment:*"
       Policies:
         - PolicyName: deploy-static-sites
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              # Site buckets and the state bucket all start with the prefix.
+              - Sid: TerraformState
+                Effect: Allow
+                Action: [s3:ListBucket, s3:GetObject, s3:PutObject, s3:DeleteObject]
+                Resource:
+                  - !GetAtt StateBucket.Arn
+                  - !Sub "${StateBucket.Arn}/*"
+              # Site buckets: any name matching ManagedNamePattern.
               - Sid: Buckets
                 Effect: Allow
                 Action:
@@ -134,11 +158,11 @@ Resources:
                   - s3:PutLifecycleConfiguration
                   - s3:GetAccelerateConfiguration
                   - s3:GetReplicationConfiguration
-                Resource: !Sub "arn:${AWS::Partition}:s3:::${ResourcePrefix}-*"
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${ManagedNamePattern}"
               - Sid: Objects
                 Effect: Allow
                 Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
-                Resource: !Sub "arn:${AWS::Partition}:s3:::${ResourcePrefix}-*/*"
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${ManagedNamePattern}/*"
               # Distributions and OACs have no name-based ARN, so "*".
               - Sid: CloudFront
                 Effect: Allow
@@ -163,7 +187,7 @@ Resources:
                   - cloudfront:UpdateFunction
                   - cloudfront:PublishFunction
                   - cloudfront:DeleteFunction
-                Resource: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:function/${ResourcePrefix}-*"
+                Resource: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:function/${ManagedNamePattern}"
               - Sid: Certificates
                 Effect: Allow
                 Action:
